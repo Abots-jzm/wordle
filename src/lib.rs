@@ -1,21 +1,42 @@
+use std::collections::HashSet;
+
 pub mod solver;
 
-pub fn play<G: Guesser>(answer: &'static str, mut guesser: G) -> Option<usize> {
-    //play six rounds where it invokes the guesser each round
-    let mut history = Vec::new();
-    for i in 1..=32 {
-        let guess = guesser.guess(&history);
-        if guess == answer {
-            return Some(i);
+const DICTIONARY: &str = include_str!("../dictionary.txt");
+
+pub struct Wordle {
+    dictionary: HashSet<&'static str>,
+}
+
+impl Wordle {
+    pub fn new() -> Self {
+        Self {
+            dictionary: HashSet::from_iter(DICTIONARY.lines().map(|line| {
+                line.split_once(' ')
+                    .expect("Every line is word + space + frequency")
+                    .0
+            })),
         }
-        let correctness = Correctness::compute(answer, &guess);
-        history.push(Guess {
-            word: guess,
-            mask: correctness,
-        });
     }
 
-    None
+    pub fn play<G: Guesser>(&self, answer: &'static str, mut guesser: G) -> Option<usize> {
+        //play six rounds where it invokes the guesser each round
+        let mut history = Vec::new();
+        for i in 1..=32 {
+            let guess = guesser.guess(&history);
+            if guess == answer {
+                return Some(i);
+            }
+            assert!(self.dictionary.contains(&*guess));
+            let correctness = Correctness::compute(answer, &guess);
+            history.push(Guess {
+                word: guess,
+                mask: correctness,
+            });
+        }
+
+        None
+    }
 }
 
 impl Correctness {
