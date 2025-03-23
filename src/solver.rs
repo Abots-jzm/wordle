@@ -1,4 +1,4 @@
-use std::{collections::HashMap, ops::Neg};
+use std::{borrow::Cow, collections::HashMap, ops::Neg};
 
 use crate::Correctness;
 
@@ -10,7 +10,7 @@ pub struct Solver {
 
 impl Solver {
     pub fn new() -> Self {
-        Solver {
+        Self {
             remaining: HashMap::from_iter(DICTIONARY.lines().map(|line| {
                 let (word, count) = line
                     .split_once(' ')
@@ -47,7 +47,7 @@ impl Guesser for Solver {
                 let mut in_patter_total = 0;
                 for (candidate, count) in &self.remaining {
                     let g = Guess {
-                        word: word.to_string(),
+                        word: Cow::Borrowed(word),
                         mask: pattern,
                     };
                     if g.matches(candidate) {
