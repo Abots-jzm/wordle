@@ -1,26 +1,87 @@
-use core::f64;
-use std::borrow::Cow;
-
+use crate::{Correctness, Guess, PackedCorrectness, DICTIONARY, MAX_MASK_ENUM};
 use once_cell::sync::OnceCell;
+use once_cell::unsync::OnceCell as UnSyncOnceCell;
+use std::borrow::Cow;
+use std::cell::Cell;
 
-use crate::{enumerate_mask, Correctness, MAX_MASK_ENUM};
+const FIRST_GUESS: &str = "tares";
+static INITIAL_SIGMOID: OnceCell<Vec<(&'static str, f64, usize)>> = OnceCell::new();
 
-use super::{Guess, Guesser, DICTIONARY};
-
-static INITIAL: OnceCell<Vec<(&'static str, f64, usize)>> = OnceCell::new();
-static PATTERNS: OnceCell<Vec<[Correctness; 5]>> = OnceCell::new();
-static COMPUTES: OnceCell<(usize, Vec<OnceCell<u8>>)> = OnceCell::new();
+type Cache = [[Cell<Option<PackedCorrectness>>; DICTIONARY.len()]; DICTIONARY.len()];
+thread_local! {
+    static COMPUTES: UnSyncOnceCell<Box<Cache>> = Default::default();
+}
 
 pub struct Solver {
     remaining: Cow<'static, Vec<(&'static str, f64, usize)>>,
-    patterns: Cow<'static, Vec<[Correctness; 5]>>,
     entropy: Vec<f64>,
-    computes: &'static (usize, Vec<OnceCell<u8>>),
+    hard_mode: bool,
+    last_guess_idx: Option<usize>,
 }
 
 impl Default for Solver {
     fn default() -> Self {
-        Self::new()
+        Solver::new(false)
+    }
+}
+
+impl Solver {
+    pub fn new(hard_mode: bool) -> Self {
+        let remaining = INITIAL_SIGMOID.get_or_init(|| {
+            let sum: usize = DICTIONARY.iter().map(|(_, count)| count).sum();
+
+            DICTIONARY
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(idx, (word, count))| (word, sigmoid(count as f64 / sum as f64), idx))
+                .collect()
+        });
+
+        COMPUTES.with(|c| {
+            c.get_or_init(|| {
+                let c = &Cell::new(None::<PackedCorrectness>);
+                assert_eq!(std::mem::size_of_val(c), 1);
+                let c = c as *const _;
+                let c = c as *const u8;
+                assert_eq!(unsafe { *c }, 0);
+
+                let mem = unsafe {
+                    std::alloc::alloc_zeroed(
+                        std::alloc::Layout::from_size_align(
+                            std::mem::size_of::<Cache>(),
+                            std::mem::align_of::<Cache>(),
+                        )
+                        .unwrap(),
+                    )
+                };
+
+                unsafe { Box::from_raw(mem as *mut _) }
+            });
+        });
+
+        Self {
+            remaining: Cow::Borrowed(remaining),
+            entropy: Vec::new(),
+            last_guess_idx: None,
+            hard_mode,
+        }
+    }
+
+    fn trim(&mut self, mut cmp: impl FnMut(&str, usize) -> bool) {
+        if matches!(self.remaining, Cow::Owned(_)) {
+            self.remaining
+                .to_mut()
+                .retain(|&(word, _, word_idx)| cmp(word, word_idx));
+        } else {
+            self.remaining = Cow::Owned(
+                self.remaining
+                    .iter()
+                    .filter(|(word, _, word_idx)| cmp(word, *word_idx))
+                    .copied()
+                    .collect(),
+            );
+        }
     }
 }
 
@@ -38,103 +99,54 @@ fn sigmoid(p: f64) -> f64 {
     L / (1.0 + (-K * (p - X0)).exp())
 }
 
-impl Solver {
-    pub fn new() -> Self {
-        let remaining = Cow::Borrowed(INITIAL.get_or_init(|| {
-            let mut sum = 0;
-            let mut words = Vec::from_iter(DICTIONARY.lines().map(|line| {
-                let (word, count) = line
-                    .split_once(' ')
-                    .expect("every line is word + space + frequency");
-                let count: usize = count.parse().expect("every count is a number");
-                sum += count;
-                (word, count)
-            }));
-
-            words.sort_unstable_by_key(|&(_, count)| std::cmp::Reverse(count));
-
-            let words: Vec<_> = words
-                .into_iter()
-                .enumerate()
-                .map(|(idx, (word, count))| (word, sigmoid(count as f64 / sum as f64), idx))
-                .collect();
-
-            words
-        }));
-
-        let dimension = remaining.len();
-
-        Self {
-            remaining,
-            patterns: Cow::Borrowed(PATTERNS.get_or_init(|| Correctness::patterns().collect())),
-            entropy: Vec::new(),
-            computes: COMPUTES
-                .get_or_init(|| (dimension, vec![Default::default(); dimension * dimension])),
+// This inline gives about a 13% speedup.
+#[inline]
+fn get_packed(
+    row: &[Cell<Option<PackedCorrectness>>],
+    guess: &str,
+    answer: &str,
+    answer_idx: usize,
+) -> PackedCorrectness {
+    let cell = &row[answer_idx];
+    match cell.get() {
+        Some(a) => a,
+        None => {
+            let correctness = PackedCorrectness::from(Correctness::compute(answer, guess));
+            cell.set(Some(correctness));
+            correctness
         }
     }
 }
 
-fn cachable_enumeration(answer: &str, guess: &str) -> u8 {
-    enumerate_mask(&Correctness::compute(answer, guess)) as u8
-}
-
-fn get_row(
-    computes: &'static (usize, Vec<OnceCell<u8>>),
-    guess_idx: usize,
-) -> &'static [OnceCell<u8>] {
-    let (dimension, vec) = computes;
-    let start = guess_idx * dimension;
-    let end = start + dimension;
-    &vec[start..end]
-}
-
-fn get_enumeration(row: &[OnceCell<u8>], answer: &str, guess: &str, guess_idx: usize) -> u8 {
-    *row[guess_idx].get_or_init(|| cachable_enumeration(guess, &answer))
-}
-
-#[derive(Debug, Copy, Clone)]
-struct Candidate {
-    word: &'static str,
-    e_score: f64,
-}
-
-impl Guesser for Solver {
-    fn guess(&mut self, history: &[Guess]) -> String {
+impl Solver {
+    pub fn guess(&mut self, history: &[Guess]) -> String {
         let score = history.len() as f64;
 
         if let Some(last) = history.last() {
-            let reference = enumerate_mask(&last.mask) as u8;
-            let last_idx = self
-                .remaining
-                .iter()
-                .find(|(word, _, _)| &*last.word == *word)
-                .unwrap()
-                .2;
-            let row = get_row(self.computes, last_idx);
-            if matches!(self.remaining, Cow::Owned(_)) {
-                self.remaining.to_mut().retain(|(word, _, word_idx)| {
-                    reference == get_enumeration(row, &last.word, word, *word_idx)
+            let reference = PackedCorrectness::from(last.mask);
+            COMPUTES.with(|c| {
+                let row = &c.get().unwrap()[self.last_guess_idx.unwrap()];
+                self.trim(|word, word_idx| {
+                    reference == get_packed(row, &last.word, word, word_idx)
                 });
-            } else {
-                self.remaining = Cow::Owned(
-                    self.remaining
-                        .iter()
-                        .filter(|(word, _, word_idx)| {
-                            reference == get_enumeration(row, &last.word, word, *word_idx)
-                        })
-                        .copied()
-                        .collect(),
-                );
-            }
+            });
         }
+
         if history.is_empty() {
-            self.patterns = Cow::Borrowed(PATTERNS.get().unwrap());
-            // NOTE: I did a manual run with this commented out and it indeed produced "tares" as
-            // the first guess. It slows down the run by a lot though.
-            return "tares".to_string();
-        } else {
-            assert!(!self.patterns.is_empty());
+            self.last_guess_idx = Some(
+                self.remaining
+                    .iter()
+                    .find(|(word, _, _)| &**word == FIRST_GUESS)
+                    .map(|&(_, _, idx)| idx)
+                    .unwrap(),
+            );
+            return FIRST_GUESS.to_string();
+        } else if self.remaining.len() == 1 {
+            let w = self.remaining.first().unwrap();
+            self.last_guess_idx = Some(w.2);
+            return w.0.to_string();
         }
+        assert!(!self.remaining.is_empty());
 
         let remaining_p: f64 = self.remaining.iter().map(|&(_, p, _)| p).sum();
         let remaining_entropy = -self
@@ -149,21 +161,24 @@ impl Guesser for Solver {
 
         let mut best: Option<Candidate> = None;
         let mut i = 0;
-        let stop = (self.remaining.len() / 3).max(20);
-        for &(word, count, word_idx) in &*self.remaining {
-            // considering a world where we _did_ guess `word` and got `pattern` as the
-            // correctness. now, compute what _then_ is left.
-
-            // Rather than iterate over the patterns sequentially and add up the counts of words
-            // that result in that pattern, we can instead keep a running total for each pattern
-            // simultaneously by storing them in an array. We can do this since each candidate-word
-            // pair deterministically produces only one mask.
+        let stop = (self.remaining.len() / 3).max(20).min(self.remaining.len());
+        let consider = if self.hard_mode {
+            &*self.remaining
+        } else {
+            INITIAL_SIGMOID.get().unwrap()
+        };
+        for &(word, count, word_idx) in consider {
             let mut totals = [0.0f64; MAX_MASK_ENUM];
-            let row = get_row(self.computes, word_idx);
-            for (candidate, count, candidate_idx) in &*self.remaining {
-                let idx = get_enumeration(row, &word, candidate, *candidate_idx);
-                totals[idx as usize] += count;
-            }
+
+            let mut in_remaining = false;
+            COMPUTES.with(|c| {
+                let row = &c.get().unwrap()[word_idx];
+                for (candidate, count, candidate_idx) in &*self.remaining {
+                    in_remaining |= word_idx == *candidate_idx;
+                    let idx = get_packed(row, word, candidate, *candidate_idx);
+                    totals[usize::from(u8::from(idx))] += count;
+                }
+            });
 
             let sum: f64 = totals
                 .into_iter()
@@ -174,24 +189,47 @@ impl Guesser for Solver {
                 })
                 .sum();
 
-            let p_word = count as f64 / remaining_p as f64;
+            let p_word = if in_remaining {
+                count as f64 / remaining_p as f64
+            } else {
+                0.0
+            };
             let e_info = -sum;
-            let e_score = p_word * (score + 1.0)
-                + (1.0 - p_word) * (score + est_steps_left(remaining_entropy - e_info));
+            let goodness = -(p_word * (score + 1.0)
+                + (1.0 - p_word) * (score + est_steps_left(remaining_entropy - e_info)));
             if let Some(c) = best {
-                // Which one gives us a lower (expected) score?
-                if e_score < c.e_score {
-                    best = Some(Candidate { word, e_score });
+                if goodness > c.goodness {
+                    best = Some(Candidate {
+                        word,
+                        goodness,
+                        idx: word_idx,
+                    });
                 }
             } else {
-                best = Some(Candidate { word, e_score });
+                best = Some(Candidate {
+                    word,
+                    goodness,
+                    idx: word_idx,
+                });
             }
 
-            i += 1;
-            if i >= stop {
-                break;
+            if in_remaining {
+                i += 1;
+                if i >= stop {
+                    break;
+                }
             }
         }
-        best.unwrap().word.to_string()
+        let best = best.unwrap();
+        assert_ne!(best.goodness, 0.0);
+        self.last_guess_idx = Some(best.idx);
+        best.word.to_string()
     }
+}
+
+#[derive(Debug, Copy, Clone)]
+struct Candidate {
+    word: &'static str,
+    goodness: f64,
+    idx: usize,
 }

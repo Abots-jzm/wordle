@@ -1,26 +1,34 @@
-use std::{borrow::Cow, collections::HashSet};
+#![allow(clippy::type_complexity)]
+#![allow(clippy::blocks_in_if_conditions)]
 
-pub mod solver;
-const DICTIONARY: &str = include_str!("../dictionary.txt");
+use std::{borrow::Cow, collections::HashSet, num::NonZeroU8};
+
+mod solver;
+pub use solver::Solver;
+
+include!(concat!(env!("OUT_DIR"), "/dictionary.rs"));
 
 pub struct Wordle {
     dictionary: HashSet<&'static str>,
 }
 
+impl Default for Wordle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Wordle {
     pub fn new() -> Self {
         Self {
-            dictionary: HashSet::from_iter(DICTIONARY.lines().map(|line| {
-                line.split_once(' ')
-                    .expect("Every line is word + space + frequency")
-                    .0
-            })),
+            dictionary: HashSet::from_iter(DICTIONARY.iter().copied().map(|(word, _)| word)),
         }
     }
 
-    pub fn play<G: Guesser>(&self, answer: &'static str, mut guesser: G) -> Option<usize> {
-        //play six rounds where it invokes the guesser each round
+    pub fn play(&self, answer: &'static str, mut guesser: Solver) -> Option<usize> {
         let mut history = Vec::new();
+        // Wordle only allows six guesses.
+        // We allow more to avoid chopping off the score distribution for stats purposes.
         for i in 1..=32 {
             let guess = guesser.guess(&history);
             if guess == answer {
@@ -57,6 +65,16 @@ impl Wordle {
         }
         println!();
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Correctness {
+    /// Green
+    Correct,
+    /// Yellow
+    Misplaced,
+    /// Gray
+    Wrong,
 }
 
 impl Correctness {
@@ -99,41 +117,36 @@ impl Correctness {
 
         c
     }
-
-    pub fn patterns() -> impl Iterator<Item = [Self; 5]> {
-        itertools::iproduct!(
-            [Self::Correct, Self::Misplaced, Self::Wrong],
-            [Self::Correct, Self::Misplaced, Self::Wrong],
-            [Self::Correct, Self::Misplaced, Self::Wrong],
-            [Self::Correct, Self::Misplaced, Self::Wrong],
-            [Self::Correct, Self::Misplaced, Self::Wrong]
-        )
-        .map(|(a, b, c, d, e)| [a, b, c, d, e])
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Correctness {
-    ///Green
-    Correct,
-    ///Yellow
-    Misplaced,
-    ///Gray
-    Wrong,
-}
-
-pub fn enumerate_mask(c: &[Correctness; 5]) -> usize {
-    c.iter().fold(0, |acc, c| {
-        acc * 3
-            + match c {
-                Correctness::Correct => 0,
-                Correctness::Misplaced => 1,
-                Correctness::Wrong => 2,
-            }
-    })
 }
 
 pub const MAX_MASK_ENUM: usize = 3 * 3 * 3 * 3 * 3;
+
+/// A wrapper type for `[Correctness; 5]` packed into a single byte with a niche.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[repr(transparent)]
+// The NonZeroU8 here lets the compiler know that we're not using the value `0`, and that `0` can
+// therefore be used to represent `None` for `Option<PackedCorrectness>`.
+struct PackedCorrectness(NonZeroU8);
+
+impl From<[Correctness; 5]> for PackedCorrectness {
+    fn from(c: [Correctness; 5]) -> Self {
+        let packed = c.iter().fold(0, |acc, c| {
+            acc * 3
+                + match c {
+                    Correctness::Correct => 0,
+                    Correctness::Misplaced => 1,
+                    Correctness::Wrong => 2,
+                }
+        });
+        Self(NonZeroU8::new(packed + 1).unwrap())
+    }
+}
+
+impl From<PackedCorrectness> for u8 {
+    fn from(this: PackedCorrectness) -> Self {
+        this.0.get() - 1
+    }
+}
 
 pub struct Guess<'a> {
     pub word: Cow<'a, str>,
@@ -174,98 +187,5 @@ impl Guess<'_> {
 
         // The rest will be all correctly Wrong letters
         true
-    }
-}
-
-pub trait Guesser {
-    fn guess(&mut self, history: &[Guess]) -> String;
-}
-
-#[cfg(test)]
-macro_rules! mask {
-    (C) => {
-        $crate::Correctness::Correct
-    };
-    (M) => {
-        $crate::Correctness::Misplaced
-    };
-    (W) => {
-        $crate::Correctness::Wrong
-    };
-    ($($c:tt)+) => {
-        [$(mask!($c)),*]
-    };
-}
-
-#[cfg(test)]
-mod tests {
-    mod guess_matcher {
-        use crate::Guess;
-        use std::borrow::Cow;
-
-        macro_rules! check {
-            ($prev:literal + [$($mask:tt)+] allows $next:literal) => {
-                assert!(Guess {
-                    word: Cow::Borrowed($prev),
-                    mask: mask![$($mask )+]
-                }
-                .matches($next));
-                assert_eq!($crate::Correctness::compute($next, $prev), mask![$($mask )+]);
-            };
-            ($prev:literal + [$($mask:tt)+] disallows $next:literal) => {
-                assert!(!Guess {
-                    word: Cow::Borrowed($prev),
-                    mask: mask![$($mask )+]
-                }
-                .matches($next));
-                assert_ne!($crate::Correctness::compute($next, $prev), mask![$($mask )+]);
-            }
-        }
-
-        #[test]
-        fn matches() {
-            check!("abcde" + [C C C C C] allows "abcde");
-            check!("abcdf" + [C C C C C] disallows "abcde");
-            check!("abcde" + [W W W W W] allows "fghij");
-            check!("abcde" + [M M M M M] allows "eabcd");
-            check!("aaabb" + [C M W W W] disallows "accaa");
-            check!("baaaa" + [W C M W W] disallows "caacc");
-            check!("baaaa" + [W C M W W] allows "aaccc");
-            check!("abcde" + [W W W W W] disallows "bcdea");
-        }
-    }
-
-    mod compute {
-        use crate::Correctness;
-
-        #[test]
-        fn all_green() {
-            assert_eq!(Correctness::compute("abcde", "abcde"), mask!(C C C C C ))
-        }
-
-        #[test]
-        fn all_gray() {
-            assert_eq!(Correctness::compute("abcde", "fghij"), mask!(W W W W W))
-        }
-
-        #[test]
-        fn all_yellow() {
-            assert_eq!(Correctness::compute("abcde", "bcdea"), mask!(M M M M M))
-        }
-
-        #[test]
-        fn repeat_green() {
-            assert_eq!(Correctness::compute("aabbb", "aaccc"), mask!(C C W W W))
-        }
-
-        #[test]
-        fn repeat_yellow() {
-            assert_eq!(Correctness::compute("aabbb", "ccaac"), mask!(W W M M W))
-        }
-
-        #[test]
-        fn repeat_some_green() {
-            assert_eq!(Correctness::compute("abcde", "aacde"), mask!(C W C C C))
-        }
     }
 }

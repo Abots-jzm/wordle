@@ -3,6 +3,7 @@ use std::io::prelude::*;
 const DICTIONARY: &str = include_str!("dictionary.txt");
 
 fn main() {
+    println!("cargo:rerun-if-changed=dictionary.txt");
     let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let mut f = std::fs::File::create(out_dir.join("dictionary.rs"))
         .expect("could not create file in OUT_DIR");
@@ -16,14 +17,14 @@ fn main() {
     }));
     words.sort_unstable_by_key(|&(_, count)| std::cmp::Reverse(count));
 
-    write!(
+    writeln!(
         f,
-        "pub const DICTIONARY: [(&str, usize); {}] = [\n",
+        "pub const DICTIONARY: [(&str, usize); {}] = [",
         words.len()
     )
     .unwrap();
     for (word, count) in words {
-        write!(f, "(\"{}\", {}),\n", word, count).unwrap();
+        writeln!(f, "(\"{}\", {}),", word, count).unwrap();
     }
     write!(f, "];").unwrap();
 }
