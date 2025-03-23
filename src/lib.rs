@@ -74,21 +74,26 @@ impl Correctness {
         assert_eq!(answer.len(), 5);
         assert_eq!(guess.len(), 5);
         let mut c = [Correctness::Wrong; 5];
-        let mut used = [false; 5];
-        for (i, (a, g)) in answer.bytes().zip(guess.bytes()).enumerate() {
-            if a == g {
-                c[i] = Correctness::Correct;
-                used[i] = true;
+        let answer_bytes = answer.as_bytes();
+        let guess_bytes = guess.as_bytes();
+        // Array indexed by lowercase ascii letters
+        let mut misplaced = [0u8; (b'z' - b'a' + 1) as usize];
+
+        // Find all correct letters
+        for ((&answer, &guess), c) in answer_bytes.iter().zip(guess_bytes).zip(c.iter_mut()) {
+            if answer == guess {
+                *c = Correctness::Correct
+            } else {
+                // If the letter does not match, count it as misplaced
+                misplaced[(answer - b'a') as usize] += 1;
             }
         }
-
-        for (i, g) in guess.bytes().enumerate() {
-            if c[i] == Correctness::Correct {
-                continue;
-            }
-
-            if Correctness::is_misplaced(g, answer, &mut used) {
-                c[i] = Correctness::Misplaced;
+        // Check all of the non matching letters if they are misplaced
+        for (&guess, c) in guess_bytes.iter().zip(c.iter_mut()) {
+            // If the letter was guessed wrong and the same letter was counted as misplaced
+            if *c == Correctness::Wrong && misplaced[(guess - b'a') as usize] > 0 {
+                *c = Correctness::Misplaced;
+                misplaced[(guess - b'a') as usize] -= 1;
             }
         }
 
@@ -169,30 +174,6 @@ impl Guess<'_> {
 
         // The rest will be all correctly Wrong letters
         true
-    }
-
-    pub fn compatible_pattern(&self, other_pattern: &[Correctness; 5]) -> bool {
-        let mut self_wrong = 0;
-        let mut self_correct = 0;
-        for c in self.mask.iter() {
-            match c {
-                Correctness::Correct => self_correct += 1,
-                Correctness::Wrong => self_wrong += 1,
-                _ => {}
-            }
-        }
-
-        let mut other_wrong = 0;
-        let mut other_correct = 0;
-        for c in other_pattern.iter() {
-            match c {
-                Correctness::Correct => other_correct += 1,
-                Correctness::Wrong => other_wrong += 1,
-                _ => {}
-            }
-        }
-
-        other_wrong <= self_wrong && other_correct >= self_correct
     }
 }
 
