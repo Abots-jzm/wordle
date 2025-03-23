@@ -1,17 +1,15 @@
-use std::{borrow::Cow, ops::Neg};
+use std::borrow::Cow;
 
 use once_cell::sync::OnceCell;
 
-use crate::Correctness;
+use crate::{enumerate_mask, Correctness, MAX_MASK_ENUM};
 
 use super::{Guess, Guesser, DICTIONARY};
 
 static INITIAL: OnceCell<Vec<(&'static str, usize)>> = OnceCell::new();
-static PATTERNS: OnceCell<Vec<[Correctness; 5]>> = OnceCell::new();
 
 pub struct Solver {
     remaining: Cow<'static, Vec<(&'static str, usize)>>,
-    patterns: Cow<'static, Vec<[Correctness; 5]>>,
 }
 
 impl Solver {
@@ -28,7 +26,6 @@ impl Solver {
                 words.sort_unstable_by_key(|&(_, count)| std::cmp::Reverse(count));
                 words
             })),
-            patterns: Cow::Borrowed(PATTERNS.get_or_init(|| Correctness::patterns().collect())),
         }
     }
 }
@@ -56,66 +53,44 @@ impl Guesser for Solver {
                 );
             }
         }
-
         if history.is_empty() {
-            self.patterns = Cow::Borrowed(PATTERNS.get().unwrap());
             return "tares".to_string();
-        } else {
-            assert!(!self.patterns.is_empty());
         }
 
-        let remaining_count: usize = self.remaining.iter().map(|(_, c)| c).sum();
+        let remaining_count: usize = self.remaining.iter().map(|&(_, c)| c).sum();
+
         let mut best: Option<Candidate> = None;
-
-        let mut i = 0;
-        let stop = (self.remaining.len() / 2).max(20);
         for &(word, count) in &*self.remaining {
-            let mut sum = 0.0;
-            let check_pattern = |pattern: &[Correctness; 5]| {
-                let mut in_patter_total = 0;
-                for (candidate, count) in &*self.remaining {
-                    let g = Guess {
-                        word: Cow::Borrowed(word),
-                        mask: *pattern,
-                    };
-                    if g.matches(candidate) {
-                        in_patter_total += count;
-                    }
-                }
-
-                if in_patter_total == 0 {
-                    return false;
-                }
-                let p_of_this_pattern = in_patter_total as f64 / remaining_count as f64;
-                sum += p_of_this_pattern * p_of_this_pattern.log2();
-                true
-            };
-
-            if matches!(self.patterns, Cow::Owned(_)) {
-                self.patterns.to_mut().retain(check_pattern);
-            } else {
-                self.patterns = Cow::Owned(
-                    self.patterns
-                        .iter()
-                        .copied()
-                        .filter(check_pattern)
-                        .collect(),
-                )
+            let mut totals = [0usize; MAX_MASK_ENUM];
+            for (candidate, count) in &*self.remaining {
+                let idx = enumerate_mask(&Correctness::compute(candidate, word));
+                totals[idx] += count;
             }
+
+            debug_assert_eq!(totals.iter().sum::<usize>(), remaining_count, "{}", word);
+
+            let sum: f64 = totals
+                .iter()
+                .map(|t| {
+                    if *t == 0 {
+                        0.0
+                    } else {
+                        // TODO: apply sigmoid
+                        let p_of_this_pattern = *t as f64 / remaining_count as f64;
+                        p_of_this_pattern * p_of_this_pattern.log2()
+                    }
+                })
+                .sum();
 
             let p_word = count as f64 / remaining_count as f64;
-            let goodness = p_word * sum.neg();
+            let goodness = p_word * -sum;
             if let Some(c) = best {
+                // Is this one better?
                 if goodness > c.goodness {
-                    best = Some(Candidate { word, goodness })
+                    best = Some(Candidate { word, goodness });
                 }
             } else {
-                best = Some(Candidate { word, goodness })
-            }
-
-            i += 1;
-            if i >= stop {
-                break;
+                best = Some(Candidate { word, goodness });
             }
         }
         best.unwrap().word.to_string()
