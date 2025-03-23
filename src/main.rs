@@ -6,7 +6,7 @@ fn main() {
     for answer in GAMES.split_whitespace() {
         let guesser = Solver::new();
         if let Some(score) = wordle.play(answer, guesser) {
-            println!("guessed '{}' in {} tries", answer, score);
+            println!("guessed '{}' in {} tries\n", answer, score);
         } else {
             eprintln!("failed to guess");
         }

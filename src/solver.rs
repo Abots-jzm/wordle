@@ -64,14 +64,9 @@ impl Guesser for Solver {
             let goodness = sum.neg();
             if let Some(c) = best {
                 if goodness > c.goodness {
-                    eprintln!(
-                        "{} is better than {} ({} > {})",
-                        word, c.word, goodness, c.goodness
-                    );
                     best = Some(Candidate { word, goodness })
                 }
             } else {
-                eprintln!("starting with {} (goodness: {})", word, goodness);
                 best = Some(Candidate { word, goodness })
             }
         }

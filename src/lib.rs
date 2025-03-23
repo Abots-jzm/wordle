@@ -25,17 +25,38 @@ impl Wordle {
         for i in 1..=32 {
             let guess = guesser.guess(&history);
             if guess == answer {
+                let correctness = Correctness::compute(answer, &guess);
+                let current_guess = Guess {
+                    word: Cow::Owned(guess),
+                    mask: correctness,
+                };
+                Wordle::display_guess(&current_guess);
                 return Some(i);
             }
             assert!(self.dictionary.contains(&*guess));
             let correctness = Correctness::compute(answer, &guess);
-            history.push(Guess {
+            let current_guess = Guess {
                 word: Cow::Owned(guess),
                 mask: correctness,
-            });
+            };
+            Wordle::display_guess(&current_guess);
+            history.push(current_guess);
         }
 
         None
+    }
+
+    fn display_guess(guess: &Guess) {
+        // Print the word with colored backgrounds according to the mask
+        for (c, &correctness) in guess.word.chars().zip(&guess.mask) {
+            let display = match correctness {
+                Correctness::Correct => format!("\x1b[42m {c} \x1b[0m"), // Green background
+                Correctness::Misplaced => format!("\x1b[43m {c} \x1b[0m"), // Yellow background
+                Correctness::Wrong => format!("\x1b[40m {c} \x1b[0m"),   // Black background
+            };
+            print!("{display}");
+        }
+        println!();
     }
 }
 
@@ -100,76 +121,7 @@ pub struct Guess<'a> {
 
 impl Guess<'_> {
     pub fn matches(&self, word: &str) -> bool {
-        assert_eq!(self.word.len(), 5);
-        assert_eq!(word.len(), 5);
-
-        let mut used = [false; 5];
-        for (i, ((g, &m), w)) in self
-            .word
-            .bytes()
-            .zip(&self.mask)
-            .zip(word.bytes())
-            .enumerate()
-        {
-            if m == Correctness::Correct {
-                if g != w {
-                    return false;
-                } else {
-                    used[i] = true;
-                    continue;
-                }
-            }
-        }
-
-        for (i, (w, &m)) in word.bytes().zip(&self.mask).enumerate() {
-            if m == Correctness::Correct {
-                continue;
-            }
-
-            let mut plausible = true;
-            if self
-                .word
-                .bytes()
-                .zip(&self.mask)
-                .enumerate()
-                .any(|(j, (g, m))| {
-                    if g != w {
-                        return false;
-                    }
-                    if used[j] {
-                        return false;
-                    }
-
-                    match m {
-                        Correctness::Correct => unreachable!(
-                            "All correct guesses should have resulted in return or be used"
-                        ),
-                        Correctness::Misplaced if j == i => {
-                            plausible = false;
-                            return false;
-                        }
-                        Correctness::Misplaced => {
-                            used[j] = true;
-                            return true;
-                        }
-                        Correctness::Wrong => {
-                            plausible = false;
-                            return false;
-                        }
-                    }
-                })
-                && plausible
-            {
-                //The character was yellow in the previous guess
-                assert!(plausible);
-            } else if !plausible {
-                return false;
-            } else {
-                //We have no information about 'w' so word might still match
-            }
-        }
-
-        true
+        return Correctness::compute(word, &self.word) == self.mask;
     }
 }
 
