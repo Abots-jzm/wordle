@@ -15,11 +15,11 @@ struct Args {
     #[clap(long)]
     hard: bool,
 
-    #[clap(short, long, conflicts_with = "interactive")]
+    #[clap(short, long, conflicts_with = "all")]
     games: Option<usize>,
 
     #[clap(short, long, conflicts_with = "games")]
-    interactive: bool,
+    all: bool,
 }
 
 fn main() {
@@ -30,10 +30,10 @@ fn main() {
         hard_mode = true;
     }
 
-    if args.interactive {
-        play_interactive(hard_mode);
-    } else {
+    if args.all {
         play(hard_mode, args.games);
+    } else {
+        play_interactive(hard_mode);
     }
 }
 
